@@ -1,0 +1,16 @@
+# binarios compilados
+monitor/server
+monitor/client
+*.o
+
+# datos generados en runtime, no forman parte del codigo fuente
+monitor/metrics.csv
+monitor/anomalies.csv
+
+# entornos y cache de python
+monitor/venv/
+monitor/__pycache__/
+*.pyc
+
+# archivos temporales de office
+~$*.docx
