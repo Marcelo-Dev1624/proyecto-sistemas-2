@@ -22,6 +22,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netdb.h>
 
 typedef struct {
     unsigned long long user, nice, system, idle, iowait, irq, softirq, steal;
@@ -122,6 +123,8 @@ static unsigned long long read_net_bytes(void) {
 }
 
 int main(int argc, char *argv[]) {
+    setvbuf(stdout, NULL, _IOLBF, 0); /* logs visibles en tiempo real (ej. docker logs) */
+
     if (argc < 3) {
         fprintf(stderr, "Uso: %s <ip_servidor> <puerto> [intervalo_segundos]\n", argv[0]);
         return 1;
@@ -130,23 +133,35 @@ int main(int argc, char *argv[]) {
     int port = atoi(argv[2]);
     int interval = argc >= 4 ? atoi(argv[3]) : 5;
 
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    /* server_ip puede ser una IP literal o un nombre de host/servicio
+     * (por ejemplo el nombre de un servicio en Docker Compose), por lo
+     * que se resuelve con getaddrinfo en lugar de inet_pton directo. */
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+
+    struct addrinfo hints, *res, *rp;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    int gai_err = getaddrinfo(server_ip, port_str, &hints, &res);
+    if (gai_err != 0) {
+        fprintf(stderr, "No se pudo resolver %s: %s\n", server_ip, gai_strerror(gai_err));
+        return 1;
+    }
+
+    int sock = -1;
+    for (rp = res; rp != NULL; rp = rp->ai_next) {
+        sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (sock < 0) continue;
+        if (connect(sock, rp->ai_addr, rp->ai_addrlen) == 0) break;
+        close(sock);
+        sock = -1;
+    }
+    freeaddrinfo(res);
+
     if (sock < 0) {
-        perror("socket");
-        return 1;
-    }
-
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, server_ip, &server_addr.sin_addr) <= 0) {
-        fprintf(stderr, "IP invalida: %s\n", server_ip);
-        return 1;
-    }
-
-    if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        perror("connect");
+        fprintf(stderr, "No se pudo conectar a %s:%d\n", server_ip, port);
         return 1;
     }
 

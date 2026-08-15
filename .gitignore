@@ -6,6 +6,7 @@ monitor/client
 # datos generados en runtime, no forman parte del codigo fuente
 monitor/metrics.csv
 monitor/anomalies.csv
+monitor/data/
 
 # entornos y cache de python
 monitor/venv/

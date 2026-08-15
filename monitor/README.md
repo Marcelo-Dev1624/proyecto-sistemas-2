@@ -42,6 +42,29 @@ El tercer argumento es el intervalo en segundos entre envios de metricas
 Para probar todo en una sola maquina Ubuntu Server, se puede correr el
 servidor y el cliente en dos terminales distintas usando `127.0.0.1` como IP.
 
+## Despliegue con Docker
+
+El proyecto incluye `Dockerfile.server`, `Dockerfile.client` y
+`docker-compose.yml` para desplegar el prototipo de forma reproducible.
+
+```bash
+sudo apt install -y docker.io docker-compose-v2
+cd monitor
+docker compose up --build
+```
+
+Esto levanta el servidor (puerto 9000 expuesto al host) y un cliente que se
+conecta a el por la red interna de Docker, generando metricas de forma
+continua. Las metricas quedan persistidas en `monitor/data/metrics.csv` en el
+host, gracias al volumen montado en `docker-compose.yml`.
+
+Nota: dentro de un contenedor, `/proc` refleja el propio contenedor (su uso de
+CPU, memoria y red), no necesariamente el host completo. Para recolectar
+metricas del servidor Ubuntu Server como tal (y no solo del contenedor), el
+cliente tambien puede compilarse y correrse directamente sobre el host, como
+se describe en la seccion "Ejecutar" mas arriba, apuntando al servidor
+expuesto por Docker en el puerto 9000.
+
 ## Analizar metricas
 
 Una vez que `metrics.csv` tenga suficientes filas (idealmente varios minutos

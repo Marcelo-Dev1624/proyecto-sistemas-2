@@ -1,0 +1,11 @@
+FROM gcc:13-bookworm AS build
+WORKDIR /app
+COPY server.c .
+RUN gcc -O2 -Wall -o server server.c
+
+FROM debian:bookworm-slim
+WORKDIR /app
+COPY --from=build /app/server .
+RUN mkdir -p /data
+EXPOSE 9000
+ENTRYPOINT ["./server", "9000", "/data/metrics.csv"]

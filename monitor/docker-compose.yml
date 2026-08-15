@@ -1,0 +1,17 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./data:/data
+
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    command: ["server", "9000", "5"]
+    depends_on:
+      - server

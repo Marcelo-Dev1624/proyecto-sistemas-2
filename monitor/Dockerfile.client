@@ -1,0 +1,10 @@
+FROM gcc:13-bookworm AS build
+WORKDIR /app
+COPY client.c .
+RUN gcc -O2 -Wall -o client client.c
+
+FROM debian:bookworm-slim
+WORKDIR /app
+COPY --from=build /app/client .
+ENTRYPOINT ["./client"]
+CMD ["server", "9000", "5"]

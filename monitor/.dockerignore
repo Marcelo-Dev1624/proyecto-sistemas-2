@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+*.pyc
+metrics.csv
+anomalies.csv
+data/
+server
+client
+*.o
