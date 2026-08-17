@@ -1,13 +1,19 @@
 /*
  * Cliente del monitor inteligente de sistema.
- * Lee metricas del sistema operativo desde /proc y las envia
- * periodicamente al servidor central por un socket TCP.
  *
- * Metricas recolectadas:
- *   - uso de CPU (%)      -> /proc/stat
- *   - uso de memoria (%)  -> /proc/meminfo
- *   - cantidad de procesos activos -> directorios numericos en /proc
- *   - trafico de red (bytes/seg)   -> /proc/net/dev
+ * Este programa corre en la maquina que se quiere monitorear. Cada
+ * cierto tiempo lee un conjunto de metricas directamente del sistema
+ * operativo (a traves de /proc, que en Linux funciona como una interfaz
+ * para consultar el estado del kernel) y se las manda al servidor
+ * central por un socket TCP, para que este las guarde y mas adelante se
+ * puedan analizar buscando comportamientos anomalos.
+ *
+ * Metricas que se recolectan en cada ronda:
+ *   uso de CPU en porcentaje, leido de /proc/stat
+ *   uso de memoria en porcentaje, leido de /proc/meminfo
+ *   cantidad de procesos activos, contando los directorios numericos
+ *   dentro de /proc
+ *   trafico de red en bytes por segundo, leido de /proc/net/dev
  *
  * Uso: ./client <ip_servidor> <puerto> [intervalo_segundos]
  */
@@ -24,10 +30,18 @@
 #include <netinet/in.h>
 #include <netdb.h>
 
+/* /proc/stat trae, entre otras cosas, cuanto tiempo lleva la CPU
+ * acumulado en cada uno de estos estados desde que arranco el sistema.
+ * Guardamos una foto de estos valores en dos momentos distintos para
+ * despues calcular, por diferencia, que porcentaje del tiempo estuvo
+ * la CPU realmente ocupada entre esos dos momentos. */
 typedef struct {
     unsigned long long user, nice, system, idle, iowait, irq, softirq, steal;
 } cpu_times_t;
 
+/* Lee la primera linea de /proc/stat, que resume el uso acumulado de
+ * CPU de todos los nucleos juntos, y la guarda en la estructura que
+ * recibe por parametro. */
 static int read_cpu_times(cpu_times_t *t) {
     FILE *fp = fopen("/proc/stat", "r");
     if (!fp) return -1;
@@ -39,6 +53,12 @@ static int read_cpu_times(cpu_times_t *t) {
     return (n == 9) ? 0 : -1;
 }
 
+/* /proc/stat no da directamente un porcentaje de uso, da tiempo
+ * acumulado. Para sacar un porcentaje real hay que comparar dos
+ * lecturas tomadas con algo de tiempo de diferencia: el tiempo total
+ * que paso entre esas dos lecturas, contra cuanto de ese tiempo la CPU
+ * estuvo en estado inactivo (idle mas iowait). Lo que no fue tiempo
+ * inactivo se considera tiempo de uso. */
 static double cpu_percent(cpu_times_t *a, cpu_times_t *b) {
     unsigned long long idle_a = a->idle + a->iowait;
     unsigned long long idle_b = b->idle + b->iowait;
@@ -55,6 +75,12 @@ static double cpu_percent(cpu_times_t *a, cpu_times_t *b) {
     return 100.0 * (double)(total_delta - idle_delta) / (double)total_delta;
 }
 
+/* /proc/meminfo lista, linea por linea, distintos valores relacionados
+ * con la memoria del sistema. A nosotros nos interesan solo dos: el
+ * total de memoria disponible en la maquina y la memoria que en este
+ * momento esta realmente disponible para usarse (que ya tiene en
+ * cuenta cosas como la cache del sistema). Con esos dos valores se
+ * puede calcular que porcentaje de la memoria esta en uso. */
 static double mem_percent(void) {
     FILE *fp = fopen("/proc/meminfo", "r");
     if (!fp) return -1.0;
@@ -75,6 +101,12 @@ static double mem_percent(void) {
     return 100.0 * (double)(mem_total - mem_available) / (double)mem_total;
 }
 
+/* En Linux, cada proceso que esta corriendo tiene su propio directorio
+ * dentro de /proc, y ese directorio se llama exactamente igual que el
+ * PID del proceso (por ejemplo /proc/1234). Asi que para contar
+ * cuantos procesos hay activos en este momento, alcanza con recorrer
+ * /proc y contar cuantas entradas tienen un nombre formado solo por
+ * digitos. */
 static int count_processes(void) {
     DIR *d = opendir("/proc");
     if (!d) return -1;
@@ -93,6 +125,13 @@ static int count_processes(void) {
     return count;
 }
 
+/* /proc/net/dev muestra, para cada interfaz de red del sistema, cuantos
+ * bytes se recibieron y cuantos se enviaron desde que arranco. Sumamos
+ * los bytes recibidos y enviados de todas las interfaces, dejando
+ * afuera la interfaz "lo" (loopback), que es solo trafico interno de la
+ * propia maquina y no representa trafico de red real. El resultado es
+ * un contador acumulado, asi que para sacar bytes por segundo hay que
+ * comparar dos lecturas igual que se hace con la CPU. */
 static unsigned long long read_net_bytes(void) {
     FILE *fp = fopen("/proc/net/dev", "r");
     if (!fp) return 0;
@@ -100,8 +139,9 @@ static unsigned long long read_net_bytes(void) {
     char line[512];
     unsigned long long total = 0;
 
-    fgets(line, sizeof(line), fp); /* header linea 1 */
-    fgets(line, sizeof(line), fp); /* header linea 2 */
+    /* Las primeras dos lineas del archivo son encabezados, no datos. */
+    fgets(line, sizeof(line), fp);
+    fgets(line, sizeof(line), fp);
 
     while (fgets(line, sizeof(line), fp)) {
         char iface[64];
@@ -123,7 +163,13 @@ static unsigned long long read_net_bytes(void) {
 }
 
 int main(int argc, char *argv[]) {
-    setvbuf(stdout, NULL, _IOLBF, 0); /* logs visibles en tiempo real (ej. docker logs) */
+    /* Sin esto, la salida por consola queda guardada en un buffer
+     * interno y no se muestra en el momento, sino recien cuando el
+     * buffer se llena. Eso hace que, por ejemplo al ver los logs de un
+     * contenedor de Docker, no se vea nada hasta bastante despues de
+     * que realmente paso. Con el buffer por linea, cada printf se
+     * muestra apenas se ejecuta. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
 
     if (argc < 3) {
         fprintf(stderr, "Uso: %s <ip_servidor> <puerto> [intervalo_segundos]\n", argv[0]);
@@ -133,9 +179,11 @@ int main(int argc, char *argv[]) {
     int port = atoi(argv[2]);
     int interval = argc >= 4 ? atoi(argv[3]) : 5;
 
-    /* server_ip puede ser una IP literal o un nombre de host/servicio
-     * (por ejemplo el nombre de un servicio en Docker Compose), por lo
-     * que se resuelve con getaddrinfo en lugar de inet_pton directo. */
+    /* El primer argumento puede ser una direccion IP como 127.0.0.1,
+     * pero tambien puede ser un nombre de host, por ejemplo el nombre
+     * de un servicio dentro de Docker Compose. Para que ambos casos
+     * funcionen usamos getaddrinfo, que sabe resolver nombres, en vez
+     * de convertir el texto a IP a mano. */
     char port_str[16];
     snprintf(port_str, sizeof(port_str), "%d", port);
 
@@ -150,6 +198,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /* getaddrinfo puede devolver mas de una direccion posible para el
+     * mismo nombre, asi que probamos una por una hasta lograr conectar. */
     int sock = -1;
     for (rp = res; rp != NULL; rp = rp->ai_next) {
         sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
@@ -168,6 +218,8 @@ int main(int argc, char *argv[]) {
     printf("Conectado a %s:%d. Enviando metricas cada %d segundos.\n",
            server_ip, port, interval);
 
+    /* Tomamos una primera lectura antes de entrar al bucle principal,
+     * para tener con que comparar en la primera vuelta. */
     cpu_times_t prev_cpu;
     read_cpu_times(&prev_cpu);
     unsigned long long prev_net = read_net_bytes();
@@ -195,6 +247,8 @@ int main(int argc, char *argv[]) {
         char ts[32];
         strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm_info);
 
+        /* Armamos la linea que se va a mandar al servidor, en el mismo
+         * orden de columnas que despues espera el CSV. */
         char line[256];
         int len = snprintf(line, sizeof(line), "%s,%.2f,%.2f,%d,%llu\n",
                             ts, cpu_pct, mem_pct, proc_count, net_bps);
